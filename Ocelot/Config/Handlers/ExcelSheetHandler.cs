@@ -66,7 +66,11 @@ public class ExcelSheetHandler<T> : SelectHandler<T>
     protected override T GetValue(RenderContext context)
     {
         var value = (uint)(context.GetValue() ?? 1);
-        return Svc.Data.GetExcelSheet<T>().First(d => d.RowId == value);
+        var sheet = Svc.Data.GetExcelSheet<T>();
+
+        // 這個方法每幀都會被下拉選單呼叫，原本的 First(d => d.RowId == value) 是整表線性掃描。
+        // 改用 O(1) 的 GetRowOrDefault；查不到時回退表格第一列，而不是丟例外中斷整個設定視窗的 Draw。
+        return sheet.GetRowOrDefault(value) ?? sheet.FirstOrDefault();
     }
 
     protected override void SetValue(RenderContext context, T value)
