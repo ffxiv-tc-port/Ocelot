@@ -28,7 +28,21 @@ public class Prowl(Vector3 destination, IGameObject? obj = null)
         set => FinalDestination = value;
     }
 
-    public IGameObject? GameObject { get; private set; } = obj;
+    // ⚠️ 不要把 IGameObject 存進欄位跨幀用。
+    // Dalamud 的 GameObject.Address 在建構時就凍結、永不重新解析
+    // (GameObject.cs:137-139,所有屬性都走 Struct => (GameObject*)this.Address),
+    // 而 IGameObject.IsValid() 只檢查「玩家有沒有登入」、完全不驗證位址
+    // (GameObject.cs:170-177)。所以存 IGameObject == 存一根原生指標。
+    // 原本 GameObject 是建構時凍結的參考,而下面的追蹤步驟每幀重跑、
+    // 甚至在 Task.Run 的背景執行緒上解參考 → 目標消失後就是攔不到的 AccessViolation。
+    // 正解:存 GameObjectId,每次讀取時重查物件表,查不到就回 null 讓呼叫端自己停。
+    private ulong? gameObjectId = obj?.GameObjectId;
+
+    public IGameObject? GameObject
+    {
+        get => gameObjectId is null ? null : Svc.Objects.SearchById(gameObjectId.Value);
+        private set => gameObjectId = value?.GameObjectId;
+    }
 
     public readonly Vector3 OriginalStart = Player.Position;
 
@@ -173,12 +187,15 @@ public class Prowl(Vector3 destination, IGameObject? obj = null)
                     return true;
                 }
 
-                if (GameObject == null)
+                if (!ShouldTrack(this) || trackingTask is { IsCompleted: false })
                 {
                     return false;
                 }
 
-                if (!ShouldTrack(this) || trackingTask is { IsCompleted: false })
+                // 每幀重查物件表;查不到代表追蹤目標已消失,直接放棄追蹤(fail-closed),
+                // 而不是繼續拿建構時凍結的位址去解參考。
+                var tracked = GameObject;
+                if (tracked == null)
                 {
                     return false;
                 }
@@ -189,14 +206,19 @@ public class Prowl(Vector3 destination, IGameObject? obj = null)
                     trackingTask = null;
                 }
 
-                if (GameObject.Position.DistanceTo2D(Destination) <= GameObject.HitboxRadius)
+                if (tracked.Position.DistanceTo2D(Destination) <= tracked.HitboxRadius)
                 {
                     return false;
                 }
 
+                // 在主執行緒上把座標算完再丟進背景工作。原本是把 IGameObject 捕獲進
+                // Task.Run,再於背景執行緒上解參考它的 Position/HitboxRadius——
+                // 那是跨幀「又」跨執行緒的懸空指標。
+                var trackPoint = tracked.GetPointOnHitboxFromPlayer(2f);
+
                 trackingTask = Task.Run(async () =>
                 {
-                    var nodes = await vnavmesh.Pathfind(Player.Position, GameObject.GetPointOnHitboxFromPlayer(2f), false);
+                    var nodes = await vnavmesh.Pathfind(Player.Position, trackPoint, false);
                     nodes = nodes.Smooth().ContinueFrom(Player.Position);
                     vnavmesh.Stop();
                     vnavmesh.MoveTo(nodes, false);
