@@ -26,8 +26,14 @@
         <DalamudLibPath Condition="$([MSBuild]::IsOSPlatform('Linux'))">$(HOME)/.xlcore/dalamud/Hooks/dev/</DalamudLibPath>
         <DalamudLibPath Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(HOME)/Library/Application Support/XIV on Mac/dalamud/Hooks/dev/</DalamudLibPath>
     </PropertyGroup>
+    <!-- Pictomancy 原本是 NuGet 套件 Pictomancy 0.0.1(上游 sourpuh 發佈的版本)。
+         2026-08-18 用 SHA-256 確認:BOCCHI/bin/Release/Pictomancy.dll 與 NuGet 快取裡的
+         lib/net9.0-windows7.0/Pictomancy.dll 位元組完全相同(5edb0429…、檔案日期停在
+         2025-08-06),也就是說出貨的一直是上游套件,艦隊在 fork 上做的任何修正都不會生效,
+         失敗形式與 ECommons 那次一樣是靜默的。改成引用子模組原始碼,並與 ICE、Splatoon
+         釘同一個 commit(788bc33)。 -->
     <ItemGroup>
-        <PackageReference Include="Pictomancy" Version="0.0.1" />
+        <ProjectReference Include="..\ffxiv_pictomancy\Pictomancy\Pictomancy.csproj" />
     </ItemGroup>
     <!-- ECommons 原本是 NuGet 套件 Ecommons 3.0.0.17-api13(上游 NightmareXIV 發佈的 api13 版)。
          2026-08-18 用 SHA-256 確認:出貨的 ECommons.dll 與 NuGet 快取裡的位元組完全相同,
