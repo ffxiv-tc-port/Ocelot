@@ -2,12 +2,6 @@
   "version": 1,
   "dependencies": {
     "net9.0-windows7.0": {
-      "ECommons": {
-        "type": "Direct",
-        "requested": "[3.0.0.17-api13, )",
-        "resolved": "3.0.0.17-api13",
-        "contentHash": "r7MblEmo2zOksX2qiapL7eFhGYnXZOvu4QOb6zd8LHApjde3c+iF/JVowqUWxaAz4yS+M/bvrppsfJNIdRLm2A=="
-      },
       "Pictomancy": {
         "type": "Direct",
         "requested": "[0.0.1, )",
@@ -972,6 +966,9 @@
           "System.Threading": "4.3.0",
           "System.Xml.ReaderWriter": "4.3.0"
         }
+      },
+      "ecommons": {
+        "type": "Project"
       }
     }
   }

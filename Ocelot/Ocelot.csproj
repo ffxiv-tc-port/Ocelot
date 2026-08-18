@@ -19,8 +19,14 @@
         <DalamudLibPath Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(HOME)/Library/Application Support/XIV on Mac/dalamud/Hooks/dev/</DalamudLibPath>
     </PropertyGroup>
     <ItemGroup>
-        <PackageReference Include="Ecommons" Version="3.0.0.17-api13" />
         <PackageReference Include="Pictomancy" Version="0.0.1" />
+    </ItemGroup>
+    <!-- ECommons 原本是 NuGet 套件 Ecommons 3.0.0.17-api13(上游 NightmareXIV 發佈的 api13 版)。
+         2026-08-18 用 SHA-256 確認:出貨的 ECommons.dll 與 NuGet 快取裡的位元組完全相同,
+         也就是說艦隊在 ffxiv-tc-port/ECommons 上做的 AVE 防護(Dispose 競態、裸解參考修補)
+         BOCCHI 一個都沒吃到。改成引用子模組原始碼,加固才會真的進到出貨檔。 -->
+    <ItemGroup>
+        <ProjectReference Include="..\ECommons\ECommons\ECommons.csproj" />
     </ItemGroup>
     <ItemGroup>
         <Reference Include="Dalamud" HintPath="$(DalamudLibPath)Dalamud.dll" Private="False" />
