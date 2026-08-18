@@ -12,6 +12,14 @@
         <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
         <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
         <DebugType>embedded</DebugType>
+
+        <!-- 與 BOCCHI.csproj 同款的組態傳遞修正。建 .sln 時 MSBuild 預設會把 Configuration
+             從 ProjectReference 上「解掉」,子專案改由方案的組態對應表決定要建哪個組態;
+             ECommons 是子模組、沒被收進任何 .sln,查不到對應就退回它自己的預設值 Debug。
+             實測 `dotnet build BOCCHI.sln -c Release` 會把 ECommons 同時建 Release 與 Debug
+             兩份,哪一份被複製進出貨目錄取決於順序,而且 0 error、完全沒有徵兆。
+             直接建 .csproj 時本來就繼承父組態,所以這對 CI 與發版路徑是 no-op。 -->
+        <ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
     </PropertyGroup>
     <PropertyGroup>
         <DalamudLibPath Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(appdata)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
