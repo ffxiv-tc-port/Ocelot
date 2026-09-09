@@ -57,6 +57,13 @@ public class Chain : IDisposable
 
         tasks = new TaskManager(defaultConfiguration);
 
+        // 逾時時說得出是哪一步 —— 理由與限制寫在 OnChainTaskTimeout 的註解裡。
+        // ⚠️ 一定要改 TaskManager 自己那份 DefaultConfiguration，不是上面那個區域變數：
+        //    建構子做的是 new TaskManagerConfiguration{...}.With(傳進來的)，
+        //    事件被複製進另一個物件，事後對傳進去的那個物件指派完全沒有效果。
+        tasks.DefaultConfiguration.TimeoutSilently = true;
+        tasks.DefaultConfiguration.OnTaskTimeout += OnChainTaskTimeout;
+
         Svc.Framework.Update += Tick;
 
         Debug($"Starting Chain [{Name}]");
@@ -312,6 +319,96 @@ public class Chain : IDisposable
     {
         OnFinallyCallback += callback;
         return this;
+    }
+
+    /// <summary>
+    /// 動作鏈裡任何一步逾時時，先把「是哪一步」寫進 log，再讓 ECommons 照原本的流程往下走。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 由來：ECommons 的 <c>TaskTimeoutException</c> 是一個<b>完全空的類別</b>
+    /// （<c>ECommons/Automation/NeoTaskManager/TaskTimeoutException.cs</c>：
+    /// <c>public class TaskTimeoutException : Exception { }</c>，連 Message 都沒有），
+    /// 逾時時印出去的 <c>e.LogWarning()</c> 只有空訊息 ＋ 永遠指向 <c>TaskManager.Tick</c> 的堆疊
+    /// ⇒ <b>完全匿名</b>。唯一帶任務名的那一行被 <c>ShowDebug</c> 閘住，而這裡從來沒有開過。
+    /// ⇒ FATE 自動戰鬥主迴圈、尋寶、狩獵列車任何一步等不到條件而
+    /// <c>AbortOnTimeout</c>（預設 true）清掉整條動作鏈時，log 上查不出是哪一步。
+    /// </para>
+    /// <para>
+    /// 📌 <c>ChainAddon</c> 的兩支等待介面任務自己帶了處理器（會印出在等哪一個介面），
+    /// 那種情況這裡直接讓路，不要印兩遍。
+    /// </para>
+    /// <para>
+    /// 🔴 等級刻意維持 <c>Warning</c>：ECommons 原本就是 Warning，降級只會弱化訊號。
+    /// 🔴 刻意<b>不</b>改 ECommons —— 全艦隊二十幾個消費端共用那一份。
+    /// ⚠️ <paramref name="remainingTimeMS"/> 是 <c>ref</c>：寫它等於偷偷延長逾時，這裡<b>只讀不寫</b>。
+    /// ⚠️ <c>TimeoutSilently = true</c> 蓋掉 ECommons 那行匿名 Warning 的前提是
+    /// <b>沒有任務把 <c>ExecuteDefaultConfigurationEvents</c> 設成 false</b>
+    /// （設了的話預設事件不會觸發，就會變成「靜默 ＋ 沒有人印」）。
+    /// Ocelot 與 BOCCHI 目前一處都沒有用到那個旗標。
+    /// </para>
+    /// </remarks>
+    private void OnChainTaskTimeout(TaskManagerTask task, ref long remainingTimeMS)
+    {
+        if (task.Configuration?.OnTaskTimeout != null)
+        {
+            return;
+        }
+
+        var limit = task.Configuration?.TimeLimitMS ?? tasks.DefaultConfiguration.TimeLimitMS;
+        var abort = task.Configuration?.AbortOnTimeout ?? tasks.DefaultConfiguration.AbortOnTimeout ?? true;
+        Logger.Warning(
+            $"動作鏈 [{Name}] 任務逾時：{DescribeTask(task)}，上限 {(limit.HasValue ? limit.Value.ToString() : "?")} ms"
+            + (abort ? "，整條動作鏈會被中止。" : "，只丟棄這一步，其餘步驟繼續。"));
+    }
+
+    /// <summary>
+    /// 盡量把一個任務描述成人看得懂的樣子。
+    /// </summary>
+    /// <remarks>
+    /// 🔑 2026-09-10 用編譯器實測（net9 / Roslyn）確認過這三種形狀，<b>不要憑印象推</b>：
+    /// <list type="bullet">
+    /// <item>方法群組：<c>Name = MethodGroupTarget</c>、<c>Location = Outer</c> —— 兩個都有用。</item>
+    /// <item>lambda：<c>Name = &lt;Run&gt;b__2_0</c>、<c>Location = &lt;&gt;c</c> 或
+    /// <c>&lt;&gt;c__DisplayClass2_0</c> —— <b><c>Location</c> 裡一個類別名都沒有</b>，
+    /// 有用的資訊反而在 <c>Name</c> 的角括號裡（外層方法名）。</item>
+    /// <item>區域函式：<c>Name = &lt;Run&gt;g__Local|2_3</c>、<c>Location = Outer</c>。</item>
+    /// </list>
+    /// ⚠️ 動作鏈的步驟絕大多數是 lambda，所以這仍然只是「從完全查不出來」變成
+    /// 「查得到是哪個方法／哪個檔」，不是「查得到是第幾行」。
+    /// </remarks>
+    private static string DescribeTask(TaskManagerTask task)
+    {
+        var name = task.Name ?? "";
+        var location = task.Location ?? "";
+        if (TryGetEnclosingMethod(name, out var enclosing))
+        {
+            // lambda 的 Location 是編譯器產生的 <>c / <>c__DisplayClassN_M，印出來只是噪音。
+            return location.StartsWith("<>", StringComparison.Ordinal)
+                ? $"{enclosing}() 內的匿名步驟 [{name}]"
+                : $"{enclosing}() 內的匿名步驟 [{name}@{location}]";
+        }
+
+        return $"[{name}@{location}]";
+    }
+
+    /// <summary>從 <c>&lt;外層方法&gt;b__N</c> / <c>&lt;外層方法&gt;g__名字|N_M</c> 取出外層方法名。</summary>
+    private static bool TryGetEnclosingMethod(string name, out string enclosing)
+    {
+        enclosing = "";
+        if (name.Length < 3 || name[0] != '<')
+        {
+            return false;
+        }
+
+        var end = name.IndexOf('>');
+        if (end <= 1)
+        {
+            return false;
+        }
+
+        enclosing = name.Substring(1, end - 1);
+        return true;
     }
 
     public void Dispose()
