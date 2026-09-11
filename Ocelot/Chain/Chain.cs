@@ -61,6 +61,32 @@ public class Chain : IDisposable
     private bool timedOut;
 
     /// <summary>
+    /// 這條動作鏈是不是以「非正常」的方式收場的 —— 逾時、步驟擲出例外、
+    /// 或步驟回傳 <c>null</c>（要求中止整條佇列）三者之一。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 為什麼三條路徑共用一個旗標：ECommons <c>TaskManager.Tick</c> 對它們做的事情
+    /// <b>完全相同</b> —— <c>catch(TaskTimeoutException)</c> 的 <c>Abort()</c>、
+    /// <c>catch(Exception)</c> 經 <c>AbortOnError</c> 的 <c>Abort()</c>、
+    /// 以及 <c>result == null</c> 的 <c>Abort()</c>（<c>TaskManager.cs</c> 的
+    /// <c>:211</c>／<c>:250</c>／<c>:200</c>）。<c>Abort()</c> 做的是
+    /// <c>Tasks.Clear()</c> ＋ <c>CurrentTask = null</c>
+    /// ⇒ 事後看 <see cref="IsMainComplete"/>，三者與「所有步驟都跑完了」
+    /// <b>長得一模一樣</b>，TaskManager 沒有留下任何可以分辨的狀態。
+    /// 所以只能在中止發生的當下由我們自己記一筆，否則失敗會被回報成成功
+    /// （<c>OnComplete</c> 被觸發，呼叫端的善後永遠不會跑）。
+    /// </para>
+    /// <para>
+    /// 📌 收尾動作也刻意相同（<c>OnCancel</c> ＋ <c>OnFinally</c>）——
+    /// 呼叫端掛在 <c>OnCancel</c> 上的善後（停下尋路、把狀態切回可用）
+    /// 在這三種情況下要做的事情本來就是同一件，所以不需要三個獨立旗標。
+    /// 真的要分辨「是不是逾時」請讀 <see cref="IsTimedOut"/>。
+    /// </para>
+    /// </remarks>
+    private bool abortedAbnormally;
+
+    /// <summary>
     /// 這條動作鏈是不是因為逾時而被中止的。
     /// </summary>
     /// <remarks>
@@ -70,6 +96,11 @@ public class Chain : IDisposable
     /// 讓它在逾時後永遠回 <c>false</c> 會把外層卡死
     /// （<c>RetryChainFactory.Config()</c> 的外殼是 <c>TimeLimitMS = int.MaxValue</c>，
     /// 真的會永遠等下去）。要分辨「跑完」與「逾時收場」請讀這個屬性。
+    /// <para>
+    /// ⚠️ 這個屬性<b>只</b>回答「是不是逾時」。步驟擲出例外或回傳 <c>null</c>
+    /// 同樣會走取消收尾，但那兩種情況它是 <c>false</c>
+    /// —— 要問的是「有沒有正常跑完」請看 <see cref="abortedAbnormally"/> 的說明。
+    /// </para>
     /// </remarks>
     public bool IsTimedOut
     {
@@ -136,6 +167,8 @@ public class Chain : IDisposable
         //    事件被複製進另一個物件，事後對傳進去的那個物件指派完全沒有效果。
         tasks.DefaultConfiguration.TimeoutSilently = true;
         tasks.DefaultConfiguration.OnTaskTimeout += OnChainTaskTimeout;
+        tasks.DefaultConfiguration.OnTaskException += OnChainTaskException;
+        tasks.DefaultConfiguration.OnTaskCompletion += OnChainTaskCompletion;
 
         Svc.Framework.Update += Tick;
 
@@ -174,6 +207,12 @@ public class Chain : IDisposable
     /// 那一幀 <c>timedOut</c> 還是 <c>false</c> 而佇列還沒清空
     /// （<see cref="IsMainComplete"/> 為 <c>false</c>），下一幀才走逾時分支，結果相同。
     /// </para>
+    /// <para>
+    /// 📌 上面第 1 條的觸發條件是「<b>任何</b>非正常中止」，不只逾時：步驟擲出例外
+    /// （<c>AbortOnError</c>）與步驟回傳 <c>null</c>（要求中止佇列）在 ECommons 那側
+    /// 走的是同一個 <c>Abort()</c>，留下的狀態也和「全部跑完」分不出來，
+    /// 所以三者共用 <see cref="abortedAbnormally"/>、共用同一段收尾。
+    /// </para>
     /// </remarks>
     private void Tick(IFramework _)
     {
@@ -182,9 +221,10 @@ public class Chain : IDisposable
             return;
         }
 
-        if (timedOut)
+        if (abortedAbnormally)
         {
-            Logger.Debug($"Chain [{Name}] timed out.");
+            var reason = timedOut ? "timed out" : "was aborted abnormally";
+            Logger.Debug($"Chain [{Name}] {reason}.");
 
             hasTriggeredClosingTasks = true;
             tasks.Enqueue(() => OnCancelCallback?.Invoke());
@@ -440,6 +480,119 @@ public class Chain : IDisposable
     }
 
     /// <summary>
+    /// 動作鏈裡任何一步擲出例外時，記下「這條鏈是被中止的」，並把是哪一步寫進 log。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 由來與逾時那條完全同形：ECommons <c>TaskManager.Tick</c> 的
+    /// <c>catch(Exception)</c> 在 <c>AbortOnError</c>（預設 <c>true</c>）時呼叫 <c>Abort()</c>，
+    /// 而 <c>Abort()</c> 清空佇列之後，<see cref="IsMainComplete"/> 與「全部跑完」
+    /// 分不出來 ⇒ 不記這一筆的話，一個擲例外的步驟會讓整條鏈去觸發 <c>OnComplete</c>。
+    /// 實例：<c>Prowl</c> 上坐騎失敗時 <c>throw new Exception("Failed to mount")</c>，
+    /// 在這個修正之前整條鏈被清空、後面的 <c>vnavmesh.Stop()</c> 與
+    /// <c>State = Complete</c> 都沒跑，而包著它的外層任務看 <see cref="IsComplete"/> 仍然是 <c>true</c>
+    /// ⇒ 外層照樣往下走，把這段移動當成完成了。
+    /// </para>
+    /// <para>
+    /// ⚠️ 只有「這次例外真的會中止整條鏈」才記。<c>@continue</c> 為 <c>true</c>
+    /// （事件要求繼續執行同一步）或實際的 abort 決策是 <c>false</c>
+    /// （只丟棄這一步、其餘照跑）都不是失敗收尾。
+    /// </para>
+    /// <para>
+    /// ⚠️ <paramref name="continue"/> 與 <paramref name="abort"/> 是 <c>ref</c>：
+    /// 寫它們等於改變 ECommons 的中止行為，這裡<b>只讀不寫</b>。
+    /// 本處理器掛在 <c>DefaultConfiguration</c> 上，會比任務自帶的處理器<b>先</b>觸發，
+    /// 所以讀到的是還沒被別人改過的值；哪天有人替某個任務寫了會改這兩個參數的處理器，
+    /// 這裡的判斷就要改成在 TaskManager 真的 Abort 之後才設旗標。
+    /// Ocelot 與 BOCCHI 目前一個 <c>OnTaskException</c> 處理器都沒有。
+    /// </para>
+    /// <para>
+    /// 🔴 Warning 那一行刻意尊重 <c>ShowError</c>：<c>ShowError = false</c> 的任務
+    /// 是<b>刻意</b>把例外當成常規控制流的（本艦隊唯一一處是
+    /// <c>BOCCHI/Modules/Automator</c> 的尋路監看，vnavmesh 停下來時擲
+    /// <c>VnavmeshStoppedException</c> 讓這一輪重來），對它印 Warning 會在
+    /// 重試迴圈裡洗版。旗標仍然要設 —— 「不印」與「不算中止」是兩件事。
+    /// </para>
+    /// </remarks>
+    private void OnChainTaskException(TaskManagerTask task, Exception exception, ref bool @continue, ref bool? abort)
+    {
+        var doAbort = task.Configuration?.AbortOnError ?? tasks.DefaultConfiguration.AbortOnError ?? true;
+        if (abort != null)
+        {
+            doAbort = abort.Value;
+        }
+
+        if (@continue || !doAbort)
+        {
+            return;
+        }
+
+        abortedAbnormally = true;
+
+        // 任務自己帶了處理器就讓路，不要把同一次例外印兩遍（與逾時那條同樣的約定）。
+        if (task.Configuration?.OnTaskException != null)
+        {
+            return;
+        }
+
+        var showError = task.Configuration?.ShowError ?? tasks.DefaultConfiguration.ShowError ?? true;
+        if (!showError)
+        {
+            return;
+        }
+
+        Logger.Warning(
+            $"動作鏈 [{Name}] 任務擲出例外：{DescribeTask(task)}"
+            + $"（{exception.GetType().Name}：{exception.Message}），整條動作鏈會被中止，收尾走取消路徑。");
+    }
+
+    /// <summary>
+    /// 有步驟回傳 <c>null</c>（＝要求中止整條佇列）時，記下「這條鏈是被中止的」。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 第三條同形的路徑：<c>TaskManager.Tick</c> 收到 <c>result == null</c> 時直接
+    /// <c>Abort()</c>，同樣把佇列清空、同樣與「全部跑完」分不出來。
+    /// ECommons 對這條只寫一行 <c>InternalLog.Debug</c>（<c>ShowDebug</c> 預設 <c>false</c>，
+    /// 而 <c>InternalLog</c> 只進環形緩衝區不進實機 log）⇒ 在這個修正之前，
+    /// 一條被 <c>null</c> 中止的動作鏈會<b>一個字都不留</b>地回報成功。
+    /// </para>
+    /// <para>
+    /// 📌 為什麼可以掛在 <c>OnTaskCompletion</c> 上：那個事件的觸發條件是
+    /// 「<c>result != false</c>」，也就是 <c>true</c> 與 <c>null</c> 兩種都會觸發
+    /// （<c>TaskManager.cs:178-191</c>），而它就發生在 <c>Abort()</c> 之前。
+    /// <c>null</c> 以外一律立刻返回，成本是每個步驟完成時一次 null 檢查。
+    /// </para>
+    /// <para>
+    /// ⚠️ <paramref name="isCompleted"/> 是 <c>ref</c>，這裡<b>只讀不寫</b>。
+    /// 與上面同理：本處理器先跑，任務自帶的處理器若把 <c>null</c> 改成 <c>true</c>／<c>false</c>，
+    /// 這個旗標就會多設一次。Ocelot 與 BOCCHI 目前一個 <c>OnTaskCompletion</c> 處理器都沒有。
+    /// </para>
+    /// <para>
+    /// ⚠️ 本庫沒有任何步驟是<b>刻意</b>回 <c>null</c> 的 —— 要中止一條鏈的正規寫法是
+    /// <c>BreakIf</c>／<c>RunIf</c>（走 <c>ChainContext</c> 的 CancellationToken）。
+    /// 所以這裡的 Warning 不設閘門：走到這條路徑本身就是意外。
+    /// </para>
+    /// </remarks>
+    private void OnChainTaskCompletion(TaskManagerTask task, ref bool? isCompleted)
+    {
+        if (isCompleted != null)
+        {
+            return;
+        }
+
+        abortedAbnormally = true;
+
+        if (task.Configuration?.OnTaskCompletion != null)
+        {
+            return;
+        }
+
+        Logger.Warning(
+            $"動作鏈 [{Name}] 步驟要求中止整條佇列（回傳 null）：{DescribeTask(task)}，收尾走取消路徑。");
+    }
+
+    /// <summary>
     /// 動作鏈裡任何一步逾時時，先把「是哪一步」寫進 log，再讓 ECommons 照原本的流程往下走。
     /// </summary>
     /// <remarks>
@@ -479,6 +632,7 @@ public class Chain : IDisposable
         if (abort)
         {
             timedOut = true;
+            abortedAbnormally = true;
         }
 
         if (task.Configuration?.OnTaskTimeout != null)

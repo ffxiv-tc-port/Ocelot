@@ -234,6 +234,26 @@ public class Prowl(Vector3 destination, IGameObject? obj = null)
             })
             .OnCancel(() =>
             {
+                // 🔴 上面那個 .Then(_ => vnavmesh.Stop()) 只在「正常跑完」時會執行 ——
+                //    取消／逾時／例外三條路徑都是 TaskManager.Abort() 清空佇列，
+                //    排在後面的步驟連跑都沒跑就被丟掉了。不在這裡補一次，
+                //    自動化停下來之後角色會照著上一條路徑繼續跑，而且沒有人會再叫它停
+                //    （只有 Prowler.Abort() 會 Stop，那是使用者主動中斷才走的路徑）。
+                // 📌 放 OnCancel 而不是 OnFinally：OnFinally 連正常完成也會跑，
+                //    那條路徑上面的 Stop 步驟已經執行過了，會變成每次都停兩次。
+                // ⚠️ 包 try/catch 的理由：Stop 是 vnavmesh 的 IPC，對方沒載入／正在卸載時
+                //    會擲 IpcNotReadyError，而這一整段是被當成一個任務排進 TaskManager 的 ——
+                //    在這裡擲例外會讓 ECommons 再 Abort() 一次，把排在後面的 OnFinally
+                //    一起清掉（呼叫端的收尾就此消失）。
+                try
+                {
+                    vnavmesh.Stop();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warning($"Prowl 取消收尾時停不下 vnavmesh：{ex.GetType().Name}：{ex.Message}");
+                }
+
                 OnCancel(this, vnavmesh);
                 State = ProwlState.Cancelled;
             });
