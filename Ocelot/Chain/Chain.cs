@@ -36,6 +36,46 @@ public class Chain : IDisposable
 
     private bool hasTriggeredClosingTasks;
 
+    /// <summary>
+    /// 有沒有哪一步逾時，而且那次逾時的設定是「連整條動作鏈一起中止」。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 為什麼一定要有這個旗標：逾時中止走的是 ECommons <c>TaskManager.Abort()</c>
+    /// （<c>TaskManager.cs</c> 的 <c>catch(TaskTimeoutException)</c> 分支），
+    /// 而 <c>Abort()</c> 做的事情是 <c>Tasks.Clear()</c> ＋ <c>CurrentTask = null</c>
+    /// ⇒ 佇列被清空之後，<see cref="IsMainComplete"/> 與「所有步驟都跑完了」
+    /// <b>長得一模一樣</b>。TaskManager 沒有留下任何可以分辨的狀態，
+    /// 所以只能由我們自己在逾時的當下記一筆。
+    /// </para>
+    /// <para>
+    /// 🔴 2026-09-11 之前預設 <c>TimeLimitMS</c> 是 <c>int.MaxValue</c>，逾時實務上走不到，
+    /// 所以這條路徑的錯誤一直沒有表現出來；改成 10 分鐘上限之後它變成會走到的路徑
+    /// ⇒ 逾時被中止的動作鏈會去觸發 <c>OnComplete</c>，也就是把失敗回報成成功。
+    /// </para>
+    /// <para>
+    /// ⚠️ 只有「這次逾時真的會中止整條鏈」才記。<c>AbortOnTimeout = false</c> 的任務
+    /// 逾時只丟棄自己那一步、其餘步驟照跑，那不是失敗收尾。
+    /// </para>
+    /// </remarks>
+    private bool timedOut;
+
+    /// <summary>
+    /// 這條動作鏈是不是因為逾時而被中止的。
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ <see cref="IsComplete"/> 在逾時的情況下<b>仍然是 <c>true</c></b>，
+    /// 而且那是刻意的 —— 包著子動作鏈的外層任務（<c>Then(Func&lt;Chain&gt;)</c>）
+    /// 以及 <c>ChainQueue.Tick</c> 都用它判斷「這條鏈跑完了沒」，
+    /// 讓它在逾時後永遠回 <c>false</c> 會把外層卡死
+    /// （<c>RetryChainFactory.Config()</c> 的外殼是 <c>TimeLimitMS = int.MaxValue</c>，
+    /// 真的會永遠等下去）。要分辨「跑完」與「逾時收場」請讀這個屬性。
+    /// </remarks>
+    public bool IsTimedOut
+    {
+        get => timedOut;
+    }
+
     private DateTime createdAt { get; } = DateTime.UtcNow;
 
     public TimeSpan TimeAlive
@@ -112,9 +152,47 @@ public class Chain : IDisposable
         return Create("Unnamed", defaultConfiguration);
     }
 
+    /// <remarks>
+    /// 三條收尾路徑，順序有意義：
+    /// <list type="number">
+    /// <item><b>逾時</b> —— ECommons 已經在逾時的那一刻替我們清空佇列了
+    /// （<c>catch(TaskTimeoutException)</c> 裡的 <c>Abort()</c>），所以這裡不必再 <c>Abort()</c>
+    /// 一次，但<b>必須先判</b>：清空後的佇列與「全部跑完」分不出來，
+    /// 先判 <see cref="IsMainComplete"/> 就會把逾時當成成功。</item>
+    /// <item><b>取消</b> —— <c>BreakIf</c> / <c>RunIf</c> 走的路徑。</item>
+    /// <item><b>正常跑完</b>。</item>
+    /// </list>
+    /// <para>
+    /// ⚠️ 逾時與取消的收尾動作刻意完全一致（同樣是清空佇列 ＋ <c>OnCancel</c> ＋ <c>OnFinally</c>、
+    /// 同樣把 <c>hasTriggeredClosingTasks</c> 設起來讓 <see cref="IsComplete"/> 成立）——
+    /// 呼叫端掛在 <c>OnCancel</c> 上的善後（停下尋路、把狀態切回可用）
+    /// 在這兩種情況下要做的事情本來就是同一件。
+    /// </para>
+    /// <para>
+    /// 📌 幀內順序不影響結果：<c>TaskManager</c> 的 <c>Tick</c> 比本方法早註冊到
+    /// <c>Framework.Update</c>，所以逾時通常在同一幀就被看到；就算順序反過來，
+    /// 那一幀 <c>timedOut</c> 還是 <c>false</c> 而佇列還沒清空
+    /// （<see cref="IsMainComplete"/> 為 <c>false</c>），下一幀才走逾時分支，結果相同。
+    /// </para>
+    /// </remarks>
     private void Tick(IFramework _)
     {
-        if (context.token.IsCancellationRequested && !IsMainComplete() && !hasTriggeredClosingTasks)
+        if (hasTriggeredClosingTasks)
+        {
+            return;
+        }
+
+        if (timedOut)
+        {
+            Logger.Debug($"Chain [{Name}] timed out.");
+
+            hasTriggeredClosingTasks = true;
+            tasks.Enqueue(() => OnCancelCallback?.Invoke());
+            tasks.Enqueue(() => OnFinallyCallback?.Invoke());
+            return;
+        }
+
+        if (context.token.IsCancellationRequested && !IsMainComplete())
         {
             Logger.Debug($"Chain [{Name}] was cancelled.");
             tasks.Abort();
@@ -122,8 +200,10 @@ public class Chain : IDisposable
             hasTriggeredClosingTasks = true;
             tasks.Enqueue(() => OnCancelCallback?.Invoke());
             tasks.Enqueue(() => OnFinallyCallback?.Invoke());
+            return;
         }
-        else if (IsMainComplete() && !hasTriggeredClosingTasks)
+
+        if (IsMainComplete())
         {
             hasTriggeredClosingTasks = true;
             tasks.Enqueue(() => OnCompleteCallback?.Invoke());
@@ -388,16 +468,27 @@ public class Chain : IDisposable
     /// </remarks>
     private void OnChainTaskTimeout(TaskManagerTask task, ref long remainingTimeMS)
     {
+        var limit = task.Configuration?.TimeLimitMS ?? tasks.DefaultConfiguration.TimeLimitMS;
+        var abort = task.Configuration?.AbortOnTimeout ?? tasks.DefaultConfiguration.AbortOnTimeout ?? true;
+
+        // 🔴 這一行要在下面那個「讓路」的 return 之前：讓路只是為了不要把同一次逾時印兩遍，
+        //    但不論是誰負責印，整條動作鏈被中止這件事都一樣發生，收尾也一樣要走取消路徑。
+        //    ⚠️ 本庫沒有任何 OnTaskTimeout 處理器會去改 remainingTimeMS（改它等於偷偷延長逾時），
+        //    所以「逾時事件觸發過」與「真的會中止」在這裡是等價的；哪天有人寫了會延長的處理器，
+        //    這個旗標就要改成在 TaskManager 真的 Abort 之後才設。
+        if (abort)
+        {
+            timedOut = true;
+        }
+
         if (task.Configuration?.OnTaskTimeout != null)
         {
             return;
         }
 
-        var limit = task.Configuration?.TimeLimitMS ?? tasks.DefaultConfiguration.TimeLimitMS;
-        var abort = task.Configuration?.AbortOnTimeout ?? tasks.DefaultConfiguration.AbortOnTimeout ?? true;
         Logger.Warning(
             $"動作鏈 [{Name}] 任務逾時：{DescribeTask(task)}，上限 {(limit.HasValue ? limit.Value.ToString() : "?")} ms"
-            + (abort ? "，整條動作鏈會被中止。" : "，只丟棄這一步，其餘步驟繼續。"));
+            + (abort ? "，整條動作鏈會被中止，收尾走取消路徑。" : "，只丟棄這一步，其餘步驟繼續。"));
     }
 
     /// <summary>
