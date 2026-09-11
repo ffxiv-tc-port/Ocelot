@@ -43,6 +43,39 @@ public class Chain : IDisposable
         get => DateTime.UtcNow - createdAt;
     }
 
+    /// <summary>
+    /// 沒有自帶設定的步驟（<c>Then(Func&lt;ChainContext, bool?&gt;)</c>，
+    /// 以及設定傳 <c>null</c> 的子動作鏈）能重試多久的上限，單位毫秒。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 這個值在 2026-09-11 之前是 <c>int.MaxValue</c>，也就是「永遠不逾時」。
+    /// 後果是一個一直回傳 <c>false</c> 的步驟會把整條動作鏈永久卡住 ——
+    /// 不逾時、不中止、log 上一個字都不留，使用者看到的只是「自動化突然不動了」。
+    /// </para>
+    /// <para>
+    /// 📌 為什麼是 10 分鐘：本庫裡<b>有上限</b>的等待最長是 <c>180000</c>（3 分鐘），
+    /// 出現在四處 —— <c>BOCCHI/Chains/PathfindAndMoveToChain.cs</c>（走路橫跨一整張圖）、
+    /// <c>Modules/Automator/FateActivity.cs</c> 與 <c>Modules/Automator/CriticalEncounter.cs</c>
+    /// 的尋路監看（追一個會移動的目標），以及 <c>CriticalEncounter.cs</c> 等危命遭遇開打。
+    /// 沒自帶設定的子動作鏈可能把其中一個 3 分鐘的步驟包在裡面，再加上傳送與上坐騎，
+    /// 合理上界約 200 秒 ⇒ 取 600000 有三倍餘裕，寧可寬也不要誤殺。
+    /// </para>
+    /// <para>
+    /// ⚠️ 真正需要無上限的等待，本庫一律<b>明確</b>寫 <c>TimeLimitMS = int.MaxValue</c>
+    /// （<c>Modules/Automator/Activity.cs</c> 的「參與 FATE／危命遭遇直到它結束」，
+    /// 以及 <c>RetryChainFactory.Config()</c> 的重試外殼）。那兩處自帶設定，
+    /// <b>不受本預設值影響</b>。
+    /// </para>
+    /// <para>
+    /// ⚠️ 一次性步驟（<c>Then(Action&lt;ChainContext&gt;)</c>）第一次執行就回 <c>true</c>，
+    /// 而 <c>TaskManager.Tick</c> 是在呼叫委派<b>之前</b>才檢查逾時，所以它們碰不到這個上限；
+    /// <c>Wait(delay)</c> 走 ECommons 的 <c>DelayTask</c>，它自己帶
+    /// <c>timeLimitMS: ms * 2 + 5000</c> 的設定，同樣不受影響。
+    /// </para>
+    /// </remarks>
+    public const int DefaultTimeLimitMS = 600000;
+
     private Chain(string name, TaskManagerConfiguration? defaultConfiguration = null)
     {
         Name = name;
@@ -51,7 +84,7 @@ public class Chain : IDisposable
         {
             defaultConfiguration = new TaskManagerConfiguration
             {
-                TimeLimitMS = int.MaxValue,
+                TimeLimitMS = DefaultTimeLimitMS,
             };
         }
 
@@ -171,9 +204,14 @@ public class Chain : IDisposable
     /// <remarks>
     /// 這是需要重試或等待條件時的正確入口(回 bool 的 lambda 會自動綁到這裡)。
     /// 注意:本多載沒有 <c>TaskManagerConfiguration</c> 參數,會沿用 TaskManager 的預設值,
-    /// 而本類別的預設值是 <c>TimeLimitMS = int.MaxValue</c>,無上限重試;
+    /// 也就是 <see cref="DefaultTimeLimitMS"/>（10 分鐘）。
+    /// <para>
+    /// 🔴 這個預設在 2026-09-11 之前是 <c>int.MaxValue</c>，無上限重試，而
     /// 2026-09-03 全庫清點:BOCCHI 與 Ocelot 沒有任何一處 <c>Chain.Create</c> 傳入自訂設定,
     /// 所以一直回傳 <c>false</c> 的步驟會把整條 Chain 永遠卡住,不逾時、也不會留下 log。
+    /// 現在同樣的情況會在上限到期時逾時：<c>OnChainTaskTimeout</c> 寫一行帶步驟描述的
+    /// <c>Warning</c>，接著因為 <c>AbortOnTimeout</c> 預設為 <c>true</c> 而中止整條動作鏈。
+    /// </para>
     /// 要有界重試請自己建
     /// <c>new TaskManagerTask(func, new TaskManagerConfiguration { TimeLimitMS = ... })</c>
     /// 再用 <c>Then(TaskManagerTask)</c>。
