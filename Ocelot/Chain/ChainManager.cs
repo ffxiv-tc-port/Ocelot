@@ -41,8 +41,17 @@ public static class ChainManager
         Svc.Framework.Update += Tick;
     }
 
+    /// <remarks>
+    /// 🔴 <c>ChainQueue.Dispose()</c> 現在會同步跑呼叫端的取消收尾（<c>OnCancel</c>／
+    /// <c>OnFinally</c>），那是別人的碼 —— 一旦它回頭呼叫 <see cref="Get"/>，
+    /// 就會在 <c>foreach</c> 走訪 <c>queues</c> 的當下新增鍵值，擲出
+    /// <c>InvalidOperationException</c>。所以先在鎖內把要收的佇列從字典裡拿掉，
+    /// 真正的回收放到鎖外、走訪結束之後才做。
+    /// </remarks>
     private static void Tick(IFramework framework)
     {
+        List<ChainQueue> toDispose = [];
+
         lock (queues)
         {
             var toRemove = new List<string>();
@@ -61,7 +70,7 @@ public static class ChainManager
                         Logger.Debug($"Disposing ChainQueue '{id}' (inactive and empty)");
                     }
 
-                    queue.Dispose();
+                    toDispose.Add(queue);
                     toRemove.Add(id);
                 }
             }
@@ -71,16 +80,25 @@ public static class ChainManager
                 queues.Remove(id);
             }
         }
+
+        foreach (var queue in toDispose)
+        {
+            queue.Dispose();
+        }
     }
 
     public static void AbortAll()
     {
+        ChainQueue[] snapshot;
         lock (queues)
         {
-            foreach (var queue in queues.Values)
-            {
-                queue.Abort();
-            }
+            snapshot = [.. queues.Values];
+        }
+
+        // 鎖外中止：取消收尾是呼叫端的碼，可能回頭 Get() 一個新的佇列。
+        foreach (var queue in snapshot)
+        {
+            queue.Abort();
         }
 
         Logger.Debug("Aborted all active ChainQueues.");
@@ -90,15 +108,17 @@ public static class ChainManager
     {
         Svc.Framework.Update -= Tick;
 
+        ChainQueue[] snapshot;
         lock (queues)
         {
-            foreach (var queue in queues.Values)
-            {
-                queue.Dispose();
-            }
-
+            snapshot = [.. queues.Values];
             queues.Clear();
             Initialized = false;
+        }
+
+        foreach (var queue in snapshot)
+        {
+            queue.Dispose();
         }
     }
 }

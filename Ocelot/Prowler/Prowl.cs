@@ -269,6 +269,24 @@ public class Prowl(Vector3 destination, IGameObject? obj = null)
         Redirect(obj.Position, obj);
     }
 
+    /// <remarks>
+    /// <para>
+    /// 🔴 這段的正確性完全靠「<see cref="Prowler.Abort"/> 是同步的」：
+    /// <c>Chain.Abort()</c> 會就地把子動作鏈一起中止、就地跑完取消收尾，才回到這裡。
+    /// 所以上一輪對<b>同一個</b> <see cref="Prowl"/> 物件做的所有寫入
+    /// （<c>State = Cancelled</c>、呼叫端掛的 <see cref="OnCancel"/>）
+    /// 全部發生在下面那幾行之前，蓋不到新一輪的狀態。
+    /// </para>
+    /// <para>
+    /// 📌 這在 2026-09-12 之前是壞的，而且壞法是「回報成功」：
+    /// <c>Prowler.Abort()</c> 只中止了<b>外層</b>鏈，內層 Prowl 鏈還掛在
+    /// <c>Framework.Update</c> 上，而它當時卡著的監看步驟條件正是
+    /// <c>!vnavmesh.IsRunning()</c> —— <c>Abort</c> 第一件事就是
+    /// <c>Vnavmesh.Stop()</c>，等於親手讓那個條件成立
+    /// ⇒ 舊的內層鏈一路跑到 <c>OnComplete</c>，對同一個 Prowl 物件補上
+    /// <c>State = Complete</c>，而那時新一輪早就開始了。
+    /// </para>
+    /// </remarks>
     private void Redirect(Vector3 destination, IGameObject? obj)
     {
         Prowler.Abort();

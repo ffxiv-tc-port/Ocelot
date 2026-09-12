@@ -69,20 +69,34 @@ public class ChainQueue : IDisposable
         SubmitFront(() => Chain.Create().Then(task));
     }
 
+    /// <remarks>
+    /// <para>
+    /// 🔴 <c>Chain.Abort()</c> 會<b>同步</b>跑呼叫端的取消收尾（<c>OnCancel</c>／<c>OnFinally</c>），
+    /// 所以一定要放在 <c>lock (chains)</c> <b>外面</b>：那段是別人的碼，可能回頭
+    /// <c>Submit</c> 新的動作鏈。放在鎖裡雖然不會死鎖（<c>Monitor</c> 對同一執行緒可重入），
+    /// 但先 <c>Clear()</c> 再跑收尾、收尾又 Submit 的話，新排進來的東西會被這一輪的
+    /// <c>Clear()</c> 掃掉 —— 失敗形式是「送出去的工作靜默消失」。
+    /// ⇒ 先把佇列與目前這條鏈一起取走，鎖外才動它。
+    /// </para>
+    /// </remarks>
     public void Abort()
+    {
+        TakeCurrent()?.Abort();
+
+        Logger.Debug("Aborted current chain and cleared the queue.");
+    }
+
+    /// <summary>把「目前這條鏈」取走並清空待跑佇列；回傳的鏈由呼叫端負責收掉。</summary>
+    private Chain? TakeCurrent()
     {
         lock (chains)
         {
-            if (chain != null)
-            {
-                chain.Abort();
-                chain = null;
-            }
-
             chains.Clear();
-        }
 
-        Logger.Debug("Aborted current chain and cleared the queue.");
+            var current = chain;
+            chain = null;
+            return current;
+        }
     }
 
     public void Clear()
@@ -142,15 +156,13 @@ public class ChainQueue : IDisposable
         }
     }
 
+    /// <remarks>
+    /// 📌 只呼叫 <c>Abort()</c> 就夠：<c>Chain.Abort()</c> 自己會把子動作鏈一起收掉、
+    /// 跑完取消收尾之後呼叫 <c>Dispose()</c>。原本這裡是 <c>Abort()</c> 再 <c>Dispose()</c>，
+    /// 那是同一件事做兩遍。
+    /// </remarks>
     public void Dispose()
     {
-        if (chain != null)
-        {
-            chain.Abort();
-            chain.Dispose();
-            chain = null;
-        }
-
-        Clear();
+        TakeCurrent()?.Abort();
     }
 }

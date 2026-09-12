@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Dalamud.Plugin.Services;
 using ECommons.Automation.NeoTaskManager;
 using ECommons.DalamudServices;
@@ -10,6 +11,36 @@ public class Chain : IDisposable
     private readonly TaskManager tasks;
 
     private readonly ChainContext context = new();
+
+    /// <summary>
+    /// 這條動作鏈自己生出來、而且還活著的子動作鏈。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 為什麼非有不可：<c>Then(Func&lt;Chain&gt;)</c>／<c>ConditionalThen(…, Func&lt;Chain&gt;, …)</c>
+    /// ／<c>SubChain</c> 都是在「外層任務的 lambda 裡」呼叫 <c>factory()</c> 生出一條新的
+    /// <see cref="Chain"/>，而那條子鏈的參考只活在那個 lambda 的閉包裡。
+    /// 每一條 <see cref="Chain"/> 在建構時掛<b>兩個</b> <c>Svc.Framework.Update</c>
+    /// （自己的 <see cref="Tick"/> ＋ 它那顆 <c>TaskManager</c> 的 <c>Tick</c>），
+    /// 並把自己登記進 <c>TaskManager.Instances</c>。在這個欄位出現之前沒有任何一條路徑
+    /// 會去 <see cref="Dispose"/> 子鏈 —— 跑完之後 <see cref="Tick"/> 第一行
+    /// <c>if (hasTriggeredClosingTasks) return;</c> 每幀空轉，一路留到外掛卸載
+    /// ⇒ 長時間自動化下訂閱數線性累積。
+    /// </para>
+    /// <para>
+    /// 📌 登記在這裡的子鏈有兩條回收路徑：正常跑完時由包裝任務 <see cref="ReleaseChild"/>
+    /// 當場收掉；外層被 <see cref="Abort"/>／<see cref="Dispose"/> 時連同還活著的一起收。
+    /// </para>
+    /// <para>
+    /// ⚠️ 用 <c>lock</c> 而不是裸 <c>List</c>：加入發生在 framework 執行緒（任務 lambda 裡），
+    /// 而 <see cref="Abort"/> 可能從 UI／指令路徑進來。裸 <c>List</c> 並行改動的失敗形式
+    /// 不是「拿到舊值」而是清單本身壞掉。
+    /// </para>
+    /// </remarks>
+    private readonly List<Chain> children = [];
+
+    /// <summary>這條動作鏈有沒有被收掉了。<see cref="Dispose"/> 可能從多條路徑進來，要冪等。</summary>
+    private bool disposed;
 
     public readonly string Name;
 
@@ -355,6 +386,14 @@ public class Chain : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// 排入一個「跑一整條子動作鏈、等它跑完才算完成」的步驟。
+    /// </summary>
+    /// <remarks>
+    /// 📌 子鏈一生出來就登記進 <see cref="children"/>，跑完當場 <see cref="ReleaseChild"/>
+    /// 收掉（它掛的兩個 <c>Framework.Update</c> 才會解開）。包裝任務逾時／擲例外／
+    /// 被中止時走不到那一行，那種情況由外層的 <see cref="Abort"/>／<see cref="Dispose"/> 兜底。
+    /// </remarks>
     public Chain Then(Func<Chain> factory, TaskManagerConfiguration? config = null)
     {
         Chain? chain = null;
@@ -363,10 +402,17 @@ public class Chain : IDisposable
             if (chain == null)
             {
                 chain = factory();
+                AdoptChild(chain);
                 Logger.Debug($"Creating chain {chain.Name} from factory");
             }
 
-            return chain.IsComplete();
+            if (!chain.IsComplete())
+            {
+                return false;
+            }
+
+            ReleaseChild(chain);
+            return true;
         }, config));
     }
 
@@ -377,7 +423,17 @@ public class Chain : IDisposable
             if (condition(context))
             {
                 var chain = factory();
-                tasks.InsertMulti(new TaskManagerTask(() => chain.IsComplete(), config));
+                AdoptChild(chain);
+                tasks.InsertMulti(new TaskManagerTask(() =>
+                {
+                    if (!chain.IsComplete())
+                    {
+                        return false;
+                    }
+
+                    ReleaseChild(chain);
+                    return true;
+                }, config));
             }
         });
 
@@ -443,12 +499,116 @@ public class Chain : IDisposable
         return Then(_ => Logger.Debug(message));
     }
 
+    /// <summary>
+    /// 立刻中止這條動作鏈：清空佇列、把子動作鏈一起中止、跑取消收尾，最後收掉自己。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 為什麼要把子鏈也中止：<c>tasks.Abort()</c> 只清掉<b>本鏈</b>的佇列，
+    /// 包在 <c>Then(Func&lt;Chain&gt;)</c> 裡的那條子鏈有自己的 <c>Framework.Update</c>
+    /// 訂閱，外層被清掉之後它<b>照樣一步一步跑下去</b>。
+    /// 實例：<c>Prowler.Abort()</c> 先 <c>Vnavmesh.Stop()</c> 再 <c>ChainQueue.Abort()</c>，
+    /// 而內層 Prowl 鏈正卡在「Following Path」那個監看步驟上 ——
+    /// 它的條件是 <c>!vnavmesh.IsRunning()</c>，剛剛那個 <c>Stop()</c> 讓它<b>成立</b>
+    /// ⇒ 內層一路跑到 <c>OnComplete</c>、把 <c>State</c> 設成 <c>Complete</c>。
+    /// <b>使用者按下中止，結果回報的是「走到了」。</b>
+    /// </para>
+    /// <para>
+    /// 🔴 為什麼收尾要<b>同步</b>跑而不是照 <see cref="Tick"/> 那樣排進佇列：
+    /// 呼叫端（<c>Prowl.Redirect</c>）的寫法是「Abort 完馬上設定新一輪的狀態」，
+    /// 排進佇列的收尾會在<b>之後</b>的幀才跑，等於舊的那一輪回過頭來改新一輪的狀態；
+    /// 而且緊接著的 <see cref="Dispose"/> 會把那些還沒跑的收尾整個丟掉。
+    /// 同步跑保證「舊的收尾全部發生在 Abort 回來之前」。
+    /// </para>
+    /// <para>
+    /// ⚠️ 收尾裡的例外一定要吃掉：這裡不像 <see cref="Tick"/> 那樣跑在 TaskManager 的
+    /// try/catch 內，一個擲例外的 <c>OnCancel</c> 會讓 <see cref="Dispose"/> 整個不執行
+    /// （訂閱留著＝原本要修的洩漏又回來），而且會一路擲回呼叫端。
+    /// </para>
+    /// </remarks>
     public void Abort()
     {
         Svc.Log.Info($"Aborting chain [{Name}]");
         tasks.Abort();
 
+        // 先收子鏈：它們各自跑自己的取消收尾（Prowl 掛在 OnCancel 上的 vnavmesh.Stop 在這裡）。
+        foreach (var child in TakeChildren())
+        {
+            child.Abort();
+        }
+
+        RunClosingCallbacks();
         Dispose();
+    }
+
+    /// <summary>同步跑一次「取消」收尾（<c>OnCancel</c> ＋ <c>OnFinally</c>），最多一次。</summary>
+    private void RunClosingCallbacks()
+    {
+        if (hasTriggeredClosingTasks)
+        {
+            return;
+        }
+
+        hasTriggeredClosingTasks = true;
+
+        InvokeClosingCallback(OnCancelCallback, "OnCancel");
+        InvokeClosingCallback(OnFinallyCallback, "OnFinally");
+    }
+
+    private void InvokeClosingCallback(Action? callback, string which)
+    {
+        try
+        {
+            callback?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warning($"動作鏈 [{Name}] 的 {which} 收尾擲出例外：{ex.GetType().Name}：{ex.Message}");
+        }
+    }
+
+    /// <summary>把子動作鏈登記進來，讓它有人負責回收。</summary>
+    private void AdoptChild(Chain child)
+    {
+        lock (children)
+        {
+            if (!disposed)
+            {
+                children.Add(child);
+                return;
+            }
+        }
+
+        // 外層已經收掉之後才生出來的子鏈（例如 Abort 與任務 lambda 撞在一起）：
+        // 掛進去也沒有人會再走一次回收，當場收乾淨。
+        child.Abort();
+    }
+
+    /// <summary>子動作鏈跑完了，取消登記並收掉它。</summary>
+    private void ReleaseChild(Chain child)
+    {
+        lock (children)
+        {
+            children.Remove(child);
+        }
+
+        child.Dispose();
+    }
+
+    /// <summary>把還活著的子動作鏈整批取出並清空登記（呼叫端負責收掉它們）。</summary>
+    private List<Chain> TakeChildren()
+    {
+        lock (children)
+        {
+            if (children.Count == 0)
+            {
+                return [];
+            }
+
+            var snapshot = new List<Chain>(children);
+            children.Clear();
+            return snapshot;
+        }
     }
 
     public bool IsMainComplete()
@@ -694,9 +854,32 @@ public class Chain : IDisposable
         return true;
     }
 
+    /// <remarks>
+    /// ⚠️ 冪等：<see cref="Abort"/>、包裝任務的 <see cref="ReleaseChild"/>、
+    /// <c>ChainQueue.Tick</c> 與 <c>ChainQueue.Dispose</c> 都可能走到這裡，
+    /// 而 <c>Svc.Log.Info</c> 與子鏈的回收都不該做第二遍。
+    /// </remarks>
     public void Dispose()
     {
+        lock (children)
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+        }
+
         Svc.Log.Info($"Disposing chain [{Name}]");
+
+        // 還沒跑完就被收掉的子鏈（外層逾時／擲例外／被中止）在這裡兜底，
+        // 否則它們掛的兩個 Framework.Update 會一路留到外掛卸載。
+        foreach (var child in TakeChildren())
+        {
+            child.Dispose();
+        }
+
         tasks.Dispose();
 
         OnCancelCallback = null;
