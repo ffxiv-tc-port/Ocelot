@@ -14,7 +14,11 @@ public class RenderContext(OcelotPlugin plugin, IModule? module = null)
 
     public IModule? Module { get; private set; } = module;
 
-    public readonly PctDrawList Pictomancy = PictoService.GetDrawList();
+    /// <summary>本幀的世界疊加層繪製清單：第一次讀它時才建立，整幀沒有人讀就不跑疊加層。只在本插件的 Draw 回呼之間讀。</summary>
+    public PctDrawList Pictomancy
+    {
+        get => Plugin.OverlayDrawList();
+    }
 
     public IOcelotConfig Config
     {

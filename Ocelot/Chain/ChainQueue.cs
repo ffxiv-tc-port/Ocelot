@@ -69,20 +69,29 @@ public class ChainQueue : IDisposable
         SubmitFront(() => Chain.Create().Then(task));
     }
 
+    /// <remarks>
+    /// <c>Chain.Abort()</c> 會<b>同步</b>跑呼叫端的取消收尾（<c>OnCancel</c>／<c>OnFinally</c>），那段是別人的碼，
+    /// 可能回頭 <c>Submit</c> 新的動作鏈 ⇒ 先在鎖內清空佇列並取走目前這條鏈，鎖外才中止它：
+    /// 收尾裡新排進來的東西不會被這一輪的 <c>Clear()</c> 掃掉。
+    /// </remarks>
     public void Abort()
+    {
+        TakeCurrent()?.Abort();
+
+        Logger.Debug("Aborted current chain and cleared the queue.");
+    }
+
+    /// <summary>把「目前這條鏈」取走並清空待跑佇列；回傳的鏈由呼叫端負責收掉。</summary>
+    private Chain? TakeCurrent()
     {
         lock (chains)
         {
-            if (chain != null)
-            {
-                chain.Abort();
-                chain = null;
-            }
-
             chains.Clear();
-        }
 
-        Logger.Debug("Aborted current chain and cleared the queue.");
+            var current = chain;
+            chain = null;
+            return current;
+        }
     }
 
     public void Clear()
@@ -90,6 +99,24 @@ public class ChainQueue : IDisposable
         lock (chains)
         {
             chains.Clear();
+        }
+    }
+
+    /// <summary>把還沒開始的這一條（同一個委派實例）從待跑佇列拿掉；已經開始跑或不在佇列裡回 false。</summary>
+    internal bool Remove(Func<Chain> factory)
+    {
+        lock (chains)
+        {
+            for (var node = chains.First; node != null; node = node.Next)
+            {
+                if (ReferenceEquals(node.Value, factory))
+                {
+                    chains.Remove(node);
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 
@@ -142,15 +169,12 @@ public class ChainQueue : IDisposable
         }
     }
 
+    /// <remarks>
+    /// 📌 只呼叫 <c>Abort()</c> 就夠：<c>Chain.Abort()</c> 自己會把子動作鏈一起收掉、
+    /// 跑完取消收尾之後呼叫 <c>Dispose()</c>。
+    /// </remarks>
     public void Dispose()
     {
-        if (chain != null)
-        {
-            chain.Abort();
-            chain.Dispose();
-            chain = null;
-        }
-
-        Clear();
+        TakeCurrent()?.Abort();
     }
 }

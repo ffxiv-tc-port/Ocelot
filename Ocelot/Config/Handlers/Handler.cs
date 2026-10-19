@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using Dalamud.Bindings.ImGui;
 using Ocelot.Config.Attributes;
 using Ocelot.Modules;
-using Ocelot.Ui;
 
 namespace Ocelot.Config.Handlers;
 
@@ -15,9 +15,12 @@ public abstract class Handler(ModuleConfig self, ConfigAttribute attribute, Prop
 
     protected readonly PropertyInfo property = property;
 
+    // 內容只有屬性、型別、設定物件三個不變的參照，而且它自己快取標註：每個處理器共用一個，不必每幀新建。
+    private RenderContext? cachedContext;
+
     private RenderContext GetContext()
     {
-        return new RenderContext(property, type, self);
+        return cachedContext ??= new RenderContext(property, type, self);
     }
 
     public bool HasUnloadedRequiredPlugins(out List<string> unloaded)
@@ -39,26 +42,33 @@ public abstract class Handler(ModuleConfig self, ConfigAttribute attribute, Prop
             return (false, false);
         }
 
-        var handled = false;
-        var changed = false;
-        OcelotUi.Indent(context.GetIndentation(), () =>
+        // 與 OcelotUi.Indent 相同（深度 0 不縮排），改成直接呼叫以免每幀建立閉包。
+        var depth = context.GetIndentation();
+        if (depth > 0)
         {
-            context.CustomIcons();
+            ImGui.Indent(depth);
+        }
 
-            if (context.IsIllegal())
-            {
-                context.Illegal();
-            }
+        context.CustomIcons();
 
-            if (context.IsExperimental())
-            {
-                context.Experimental();
-            }
+        if (context.IsIllegal())
+        {
+            context.Illegal();
+        }
 
-            (handled, changed) = RenderComponent(context);
+        if (context.IsExperimental())
+        {
+            context.Experimental();
+        }
 
-            context.Tooltip();
-        });
+        var (handled, changed) = RenderComponent(context);
+
+        context.Tooltip();
+
+        if (depth > 0)
+        {
+            ImGui.Unindent(depth);
+        }
 
         return (handled, changed);
     }

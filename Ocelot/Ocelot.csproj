@@ -12,15 +12,35 @@
         <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
         <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
         <DebugType>embedded</DebugType>
+
+        <!-- 與 BOCCHI.csproj 同款的組態傳遞修正。建 .sln 時 MSBuild 預設會把 Configuration
+             從 ProjectReference 上「解掉」,子專案改由方案的組態對應表決定要建哪個組態;
+             ECommons 是子模組、沒被收進任何 .sln,查不到對應就退回它自己的預設值 Debug。
+             實測 `dotnet build BOCCHI.sln -c Release` 會把 ECommons 同時建 Release 與 Debug
+             兩份,哪一份被複製進出貨目錄取決於順序,而且 0 error、完全沒有徵兆。
+             直接建 .csproj 時本來就繼承父組態,所以這對 CI 與發版路徑是 no-op。 -->
+        <ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
     </PropertyGroup>
     <PropertyGroup>
         <DalamudLibPath Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(appdata)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
         <DalamudLibPath Condition="$([MSBuild]::IsOSPlatform('Linux'))">$(HOME)/.xlcore/dalamud/Hooks/dev/</DalamudLibPath>
         <DalamudLibPath Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(HOME)/Library/Application Support/XIV on Mac/dalamud/Hooks/dev/</DalamudLibPath>
     </PropertyGroup>
+    <!-- Pictomancy 原本是 NuGet 套件 Pictomancy 0.0.1(上游 sourpuh 發佈的版本)。
+         2026-08-18 用 SHA-256 確認:BOCCHI/bin/Release/Pictomancy.dll 與 NuGet 快取裡的
+         lib/net9.0-windows7.0/Pictomancy.dll 位元組完全相同(5edb0429…、檔案日期停在
+         2025-08-06),也就是說出貨的一直是上游套件,艦隊在 fork 上做的任何修正都不會生效,
+         失敗形式與 ECommons 那次一樣是靜默的。改成引用子模組原始碼,並與 ICE、Splatoon
+         釘同一個 commit(788bc33)。 -->
     <ItemGroup>
-        <PackageReference Include="Ecommons" Version="3.0.0.17-api13" />
-        <PackageReference Include="Pictomancy" Version="0.0.1" />
+        <ProjectReference Include="..\ffxiv_pictomancy\Pictomancy\Pictomancy.csproj" />
+    </ItemGroup>
+    <!-- ECommons 原本是 NuGet 套件 Ecommons 3.0.0.17-api13(上游 NightmareXIV 發佈的 api13 版)。
+         2026-08-18 用 SHA-256 確認:出貨的 ECommons.dll 與 NuGet 快取裡的位元組完全相同,
+         也就是說艦隊在 ffxiv-tc-port/ECommons 上做的 AVE 防護(Dispose 競態、裸解參考修補)
+         BOCCHI 一個都沒吃到。改成引用子模組原始碼,加固才會真的進到出貨檔。 -->
+    <ItemGroup>
+        <ProjectReference Include="..\ECommons\ECommons\ECommons.csproj" />
     </ItemGroup>
     <ItemGroup>
         <Reference Include="Dalamud" HintPath="$(DalamudLibPath)Dalamud.dll" Private="False" />

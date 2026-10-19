@@ -13,13 +13,14 @@ public class VNavmesh() : IPCSubscriber("vnavmesh")
 
     [EzIPC("Nav.BuildProgress")] public Func<float> GetBuildProgress = null!;
 
-    [EzIPC("Nav.Reload")] public Action ReloadNavmesh = null!;
+    [EzIPC("Nav.Reload")] public Func<bool> ReloadNavmesh = null!;
 
-    [EzIPC("Nav.Rebuild")] public Action RebuildNavmesh = null!;
+    // 回 false＝vnavmesh 節流略過了這次全量重建（不是失敗）；Nav.Reload 恆回 true。
+    [EzIPC("Nav.Rebuild")] public Func<bool> RebuildNavmesh = null!;
 
     [EzIPC("Nav.Pathfind")] public Func<Vector3, Vector3, bool, Task<List<Vector3>>> Pathfind = null!;
 
-    [EzIPC("Nav.PathfindCancelable")] public Func<Vector3, Vector3, bool, CancellationToken, List<Vector3>> PathfindCancelable = null!;
+    [EzIPC("Nav.PathfindCancelable")] public Func<Vector3, Vector3, bool, CancellationToken, Task<List<Vector3>>> PathfindCancelable = null!;
 
     [EzIPC("Nav.PathfindCancelAll")] public Action CancelAllPathfinds = null!;
 
@@ -31,9 +32,10 @@ public class VNavmesh() : IPCSubscriber("vnavmesh")
 
     [EzIPC("Nav.SetAutoLoad")] public Action<bool> SetAutoLoad = null!;
 
-    [EzIPC("Nav.BuildBitmap")] public Func<Vector3, string, float, bool> BuildBitmap = null!;
+    // 回寫出的點陣圖涵蓋範圍（最小角, 最大角）；導航網格還沒建好時提供端擲例外。
+    [EzIPC("Nav.BuildBitmap")] public Func<Vector3, string, float, (Vector3, Vector3)> BuildBitmap = null!;
 
-    [EzIPC("Nav.BuildBitmapBounded")] public Func<Vector3, string, float, Vector3, Vector3, bool> BuildBitmapBounded = null!;
+    [EzIPC("Nav.BuildBitmapBounded")] public Func<Vector3, string, float, Vector3, Vector3, (Vector3, Vector3)> BuildBitmapBounded = null!;
 
     [EzIPC("Query.Mesh.NearestPoint")] public Func<Vector3, float, float, Vector3?> FindNearestPointOnMesh = null!;
 

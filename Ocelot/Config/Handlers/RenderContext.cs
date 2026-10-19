@@ -11,13 +11,26 @@ using Ocelot.Modules;
 
 namespace Ocelot.Config.Handlers;
 
+// 設定畫面每幀對每個屬性都會走一遍：屬性上的標註、翻譯鍵、依賴屬性只查一次（它們在執行期不會變），
+// 只有「依賴屬性的值」與「插件在不在」每幀重新看。
 public class RenderContext
 {
+    // 屬性沒有 RequiredPlugin／ConflictingPlugin 時回傳的清單；那時方法回 false，呼叫端不讀它。
+    private static readonly List<string> NoPlugins = [];
+
+    private static readonly string WarningIcon = FontAwesomeIcon.ExclamationTriangle.ToIconString();
+
     private readonly PropertyInfo prop;
 
     private readonly Type type;
 
     private readonly ModuleConfig self;
+
+    private Metadata? metadata;
+
+    private string? labelSource;
+
+    private string labelWithId = string.Empty;
 
     public RenderContext(PropertyInfo prop, Type type, ModuleConfig self)
     {
@@ -26,6 +39,10 @@ public class RenderContext
         this.self = self;
     }
 
+    private Metadata Meta
+    {
+        get => metadata ??= new Metadata(prop, self.GetType());
+    }
 
     public bool IsValid()
     {
@@ -44,15 +61,14 @@ public class RenderContext
             return false;
         }
 
-        var render = prop.GetCustomAttribute<DependsOnAttribute>();
-        if (render == null)
+        var dependencies = Meta.DependsOn;
+        if (dependencies == null)
         {
             return true;
         }
 
-        foreach (var dependency in render.dependencies)
+        foreach (var dependent in dependencies)
         {
-            var dependent = self.GetType().GetProperty(dependency);
             if (dependent == null || dependent.PropertyType != typeof(bool))
             {
                 return false;
@@ -69,14 +85,14 @@ public class RenderContext
 
     public bool HasUnloadedRequiredPlugins(out List<string> unloaded)
     {
-        unloaded = [];
-
-        var attr = prop.GetCustomAttribute<RequiredPluginAttribute>();
+        var attr = Meta.RequiredPlugin;
         if (attr == null)
         {
+            unloaded = NoPlugins;
             return false;
         }
 
+        unloaded = [];
         foreach (var plugin in attr.dependencies)
         {
             if (!DalamudReflector.TryGetDalamudPlugin(plugin, out _, false, true))
@@ -91,14 +107,14 @@ public class RenderContext
 
     public bool HasLoadedConflictingPlugins(out List<string> loaded)
     {
-        loaded = [];
-
-        var attr = prop.GetCustomAttribute<ConflictingPluginAttribute>();
+        var attr = Meta.ConflictingPlugin;
         if (attr == null)
         {
+            loaded = NoPlugins;
             return false;
         }
 
+        loaded = [];
         foreach (var plugin in attr.conflicts)
         {
             if (DalamudReflector.TryGetDalamudPlugin(plugin, out _, false, true))
@@ -112,7 +128,7 @@ public class RenderContext
 
     public void CustomIcons()
     {
-        var iconAttr = prop.GetCustomAttribute<IconAttribute>();
+        var iconAttr = Meta.Icon;
         if (iconAttr == null)
         {
             return;
@@ -120,7 +136,7 @@ public class RenderContext
 
         ImGui.PushStyleColor(ImGuiCol.Text, iconAttr.color);
         ImGui.PushFont(UiBuilder.IconFont);
-        ImGui.TextUnformatted(iconAttr.icon.ToIconString());
+        ImGui.TextUnformatted(Meta.IconText);
         ImGui.PopFont();
         ImGui.PopStyleColor();
 
@@ -135,19 +151,19 @@ public class RenderContext
 
     public bool IsExperimental()
     {
-        return prop.GetCustomAttribute<ExperimentalAttribute>() != null;
+        return Meta.Experimental;
     }
 
     public uint GetIndentation()
     {
-        return prop.GetCustomAttribute<IndentAttribute>()?.depth ?? 0;
+        return Meta.Indentation;
     }
 
     public void Experimental()
     {
         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.9f, 0.0f, 1.0f));
         ImGui.PushFont(UiBuilder.IconFont);
-        ImGui.TextUnformatted(FontAwesomeIcon.ExclamationTriangle.ToIconString());
+        ImGui.TextUnformatted(WarningIcon);
         ImGui.PopFont();
         ImGui.PopStyleColor();
 
@@ -161,14 +177,14 @@ public class RenderContext
 
     public bool IsIllegal()
     {
-        return prop.GetCustomAttribute<IllegalAttribute>() != null;
+        return Meta.Illegal;
     }
 
     public void Illegal()
     {
         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.2f, 0.2f, 1.0f));
         ImGui.PushFont(UiBuilder.IconFont);
-        ImGui.TextUnformatted(FontAwesomeIcon.ExclamationTriangle.ToIconString());
+        ImGui.TextUnformatted(WarningIcon);
         ImGui.PopFont();
         ImGui.PopStyleColor();
 
@@ -182,35 +198,28 @@ public class RenderContext
 
     public void Tooltip()
     {
-        string? translation_key = null;
-        translation_key ??= prop.GetCustomAttribute<TooltipAttribute>()?.translation_key;
-        translation_key ??= prop.GetCustomAttribute<LabelAndTooltipAttribute>()?.translation_key;
-
-        var hasLabel = prop.GetCustomAttribute<LabelAttribute>() != null;
-
+        var meta = Meta;
         if (ImGui.IsItemHovered())
         {
-            if (translation_key == null && !hasLabel)
+            if (meta.TooltipKey == null && !meta.HasLabel)
             {
-                ImGui.SetTooltip(self.Owner.T($"config.{ToSnakeCase(prop.Name)}.tooltip"));
+                ImGui.SetTooltip(self.Owner.T(meta.SnakeTooltipKey));
                 return;
             }
 
-            if (translation_key != null && !hasLabel)
+            if (meta.TooltipKey != null && !meta.HasLabel)
             {
-                ImGui.SetTooltip(I18N.T(translation_key));
+                ImGui.SetTooltip(I18N.T(meta.TooltipKey));
             }
         }
     }
 
     public string GetLabel()
     {
-        string? translation_key = null;
-        translation_key ??= prop.GetCustomAttribute<LabelAttribute>()?.translation_key;
-        translation_key ??= prop.GetCustomAttribute<LabelAndTooltipAttribute>()?.translation_key;
-        if (translation_key != null)
+        var meta = Meta;
+        if (meta.LabelKey != null)
         {
-            return I18N.T(translation_key);
+            return I18N.T(meta.LabelKey);
         }
 
         if (self.Owner == null)
@@ -218,12 +227,20 @@ public class RenderContext
             return "Unknown label";
         }
 
-        return self.Owner.T($"config.{ToSnakeCase(prop.Name)}.label");
+        return self.Owner.T(meta.SnakeLabelKey);
     }
 
+    // 翻譯字串在語言不變時是同一個實例：同一個實例就沿用上次組好的「標籤##id」。
     public string GetLabelWithId()
     {
-        return $"{GetLabel()}##{prop.GetHashCode()}";
+        var label = GetLabel();
+        if (!ReferenceEquals(label, labelSource))
+        {
+            labelSource = label;
+            labelWithId = $"{label}##{prop.GetHashCode()}";
+        }
+
+        return labelWithId;
     }
 
     public object? GetValue()
@@ -265,5 +282,70 @@ public class RenderContext
         }
 
         return result.ToString();
+    }
+
+    private sealed class Metadata
+    {
+        /// <summary>DependsOn 列出的屬性（依原順序；找不到的是 null）；沒有 DependsOn 時是 null。</summary>
+        public readonly PropertyInfo?[]? DependsOn;
+
+        public readonly RequiredPluginAttribute? RequiredPlugin;
+
+        public readonly ConflictingPluginAttribute? ConflictingPlugin;
+
+        public readonly IconAttribute? Icon;
+
+        public readonly string IconText = string.Empty;
+
+        public readonly bool Experimental;
+
+        public readonly bool Illegal;
+
+        public readonly uint Indentation;
+
+        public readonly string? TooltipKey;
+
+        public readonly bool HasLabel;
+
+        public readonly string? LabelKey;
+
+        public readonly string SnakeLabelKey;
+
+        public readonly string SnakeTooltipKey;
+
+        public Metadata(PropertyInfo prop, Type configType)
+        {
+            var dependsOn = prop.GetCustomAttribute<DependsOnAttribute>();
+            if (dependsOn != null)
+            {
+                DependsOn = new PropertyInfo?[dependsOn.dependencies.Length];
+                for (var i = 0; i < DependsOn.Length; i++)
+                {
+                    DependsOn[i] = configType.GetProperty(dependsOn.dependencies[i]);
+                }
+            }
+
+            RequiredPlugin = prop.GetCustomAttribute<RequiredPluginAttribute>();
+            ConflictingPlugin = prop.GetCustomAttribute<ConflictingPluginAttribute>();
+            Icon = prop.GetCustomAttribute<IconAttribute>();
+            if (Icon != null)
+            {
+                IconText = Icon.icon.ToIconString();
+            }
+
+            Experimental = prop.GetCustomAttribute<ExperimentalAttribute>() != null;
+            Illegal = prop.GetCustomAttribute<IllegalAttribute>() != null;
+            Indentation = prop.GetCustomAttribute<IndentAttribute>()?.depth ?? 0;
+
+            var label = prop.GetCustomAttribute<LabelAttribute>();
+            var labelAndTooltip = prop.GetCustomAttribute<LabelAndTooltipAttribute>();
+            TooltipKey = prop.GetCustomAttribute<TooltipAttribute>()?.translation_key ?? labelAndTooltip?.translation_key;
+            HasLabel = label != null;
+            LabelKey = label?.translation_key ?? labelAndTooltip?.translation_key;
+
+            var snake = ToSnakeCase(prop.Name);
+            SnakeLabelKey = $"config.{snake}.label";
+            SnakeTooltipKey = $"config.{snake}.tooltip";
+        }
     }
 }

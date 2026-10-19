@@ -10,6 +10,27 @@ namespace Ocelot.Chain.ChainEx;
 
 public static class ChainAddon
 {
+    /// <summary>
+    /// 等待介面的任務逾時時，先把「在等哪一個介面」寫進 log，再讓 ECommons 照原本的流程中止佇列。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 這兩支等待任務自帶處理器，<c>Chain</c> 的預設逾時處理器會讓路：這一則是等不到介面時 log 上唯一的紀錄。
+    /// </para>
+    /// <para>
+    /// 等級刻意維持 <c>Warning</c>（ECommons 原本就是 Warning）。
+    /// <c>TimeoutSilently</c> 刻意不改回 <c>false</c>：ECommons 擲的 <c>TaskTimeoutException</c>
+    /// <b>不帶任務名</b>，改回去只會多印一行沒有資訊的 Warning。
+    /// 也刻意<b>不</b>改 ECommons（全艦隊共用那一份）。
+    /// ⚠️ <paramref name="remainingTimeMS"/> 是 <c>ref</c>：改它等於偷偷延長逾時，這裡只讀不寫。
+    /// </para>
+    /// </remarks>
+    private static void OnAddonWaitTimeout(TaskManagerTask task, ref long remainingTimeMS)
+    {
+        var limit = task.Configuration?.TimeLimitMS;
+        Logger.Warning($"任務逾時：[{task.Name}@{task.Location}] 上限 {(limit?.ToString() ?? "?")} ms，整條動作鏈會被中止。");
+    }
+
     private static unsafe TaskManagerTask AddonCallback(string addonName, bool updateState = true, params object[] callbackValues)
     {
         return new TaskManagerTask(() =>
@@ -54,7 +75,7 @@ public static class ChainAddon
             }
 
             return false;
-        }, new TaskManagerConfiguration { TimeLimitMS = timeout, TimeoutSilently = true });
+        }, $"WaitForAddonReady({addonName})", new TaskManagerConfiguration { TimeLimitMS = timeout, TimeoutSilently = true, OnTaskTimeout = OnAddonWaitTimeout });
     }
 
     public static Chain WaitForAddonReady(this Chain chain, string addonName, int timeout = 3000)
@@ -77,7 +98,7 @@ public static class ChainAddon
             }
 
             return false;
-        }, new TaskManagerConfiguration { TimeLimitMS = timeout, TimeoutSilently = true });
+        }, $"WaitForAddonNotReady({addonName})", new TaskManagerConfiguration { TimeLimitMS = timeout, TimeoutSilently = true, OnTaskTimeout = OnAddonWaitTimeout });
     }
 
     public static Chain WaitForAddonNotReady(this Chain chain, string addonName, int timeout = 3000)

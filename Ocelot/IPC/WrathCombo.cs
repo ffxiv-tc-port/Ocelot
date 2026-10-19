@@ -9,7 +9,8 @@ public class WrathCombo() : IPCSubscriber("WrathCombo")
 
     [EzIPC] public readonly Action<Guid> ReleaseControl = null!;
 
-    [EzIPC] public readonly Func<Guid, AutoRotationConfigOption, object, SetResult> SetAutoRotationConfigState = null!;
+    // 第 2 個參數提供端收 object、以整數解讀：傳 AutoRotationConfigOption 的值即可。
+    [EzIPC] public readonly Func<Guid, object, object, SetResult> SetAutoRotationConfigState = null!;
 
     [EzIPC] public readonly Func<Guid, string, bool, SetResult> SetComboOptionState = null!;
 

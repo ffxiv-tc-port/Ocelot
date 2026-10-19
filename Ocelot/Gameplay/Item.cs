@@ -28,7 +28,16 @@ public unsafe class Item(uint id)
     {
         try
         {
-            AgentInventoryContext.Instance()->UseItem(id);
+            // AgentInventoryContext.Instance() 可能回 null（agent 模組還沒就緒時）；解參考 null 原生指標是
+            // AccessViolationException，外圍的 try 完全攔不到 ⇒ 必須事前判空。
+            // agent 不在就不用道具（靜默）。
+            var agent = AgentInventoryContext.Instance();
+            if (agent == null)
+            {
+                return;
+            }
+
+            agent->UseItem(id);
         }
         catch
         {

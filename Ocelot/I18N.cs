@@ -158,8 +158,6 @@ public static class I18N
 
         if (translations.TryGetValue(fallbackLanguage, out var fallbackDict) && fallbackDict.TryGetValue(key, out var fallbackValue))
         {
-            Logger.Warning($"A translation for {key} was not found for the language {currentLanguage}, {fallbackLanguage} used instead.");
-
             var fallbackMessageKey = $"{currentLanguage}|{key}";
             if (reportedMissingKeys.Add(fallbackMessageKey))
             {
