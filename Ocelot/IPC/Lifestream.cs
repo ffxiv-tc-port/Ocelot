@@ -12,8 +12,6 @@ public class Lifestream : IPCSubscriber
     {
     }
 
-    [EzIPC] public readonly Action<string> ExecuteCommand = null!;
-
     // [EzIPC] public readonly Func<string, string, string, string, bool, bool, AddressBookEntryTuple> BuildAddressBookEntry = null!;
 
     // [EzIPC] public readonly Func<AddressBookEntryTuple, bool> IsHere = null!;

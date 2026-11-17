@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Ocelot.Modules;
-using Ocelot.ScoreBased;
 using Ocelot.States;
 
 namespace Ocelot;
@@ -75,7 +74,7 @@ public static class Registry
     {
         return GetAllLoadableTypes()
             .Where(t =>
-                (typeof(StateHandler<T, M>).IsAssignableFrom(t) || typeof(ScoreStateHandler<T, M>).IsAssignableFrom(t)) &&
+                typeof(StateHandler<T, M>).IsAssignableFrom(t) &&
                 !t.IsAbstract &&
                 t.GetCustomAttribute<StateAttribute<T>>() is not null);
     }
